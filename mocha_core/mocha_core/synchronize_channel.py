@@ -183,10 +183,15 @@ class GetDataReply(smach.State):
 
     def execute(self, userdata):
         self.outer.publishState("GetDataReply Start")
-        # store result in db
-        dbm = du.unpack_data(userdata.in_req_hash, userdata.in_answer)
         hash_list = userdata.in_hash_list.copy()
-        self.outer.dbl.add_modify_data(dbm)
+        if userdata.in_answer == Comm_msgs.SERRM.name.encode():
+            # The other robot no longer has this message: a LAST_MESSAGE
+            # topic replaced it with a newer one, which the next sync gets
+            self.outer.logger.debug(f"{self.outer.this_robot} - Channel - Message not found on the other robot")
+        else:
+            # store result in db
+            dbm = du.unpack_data(userdata.in_req_hash, userdata.in_answer)
+            self.outer.dbl.add_modify_data(dbm)
         hash_list.remove(userdata.in_req_hash)
         # rospy.logdebug(f"HASH_LIST {hash_list} REQ_HASH {userdata.in_req_hash}")
         # Transition back
@@ -467,7 +472,9 @@ class Channel():
                 packed = du.pack_data(dbm)
                 return packed
             except Exception:
-                self.logger.error(f"{self.this_robot} - Header not found: {r_header}")
+                # Expected on a LAST_MESSAGE topic: a newer message replaced
+                # it after the other robot got the header list
+                self.logger.debug(f"{self.this_robot} - Header not found: {r_header}")
                 return Comm_msgs.SERRM.name.encode()
         if header == Comm_msgs.DENDT.name:
             target = data

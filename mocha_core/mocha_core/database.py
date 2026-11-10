@@ -84,8 +84,13 @@ class DBwLock():
     with the database to ensure data integrity.
 
     sample_db may be a valid dictionary that can be preloaded into
-    the object (useful for debugging, see sample_db.py) """
-    def __init__(self, sample_db=None, ros_node=None, insertion_cb=None):
+    the object (useful for debugging, see sample_db.py).
+
+    last_only is a collection of (robot_id, topic_id) pairs whose topics
+    keep only their newest message (msg_history: LAST_MESSAGE); every other
+    topic keeps its whole history. """
+    def __init__(self, sample_db=None, ros_node=None, insertion_cb=None,
+                 last_only=None):
         if sample_db is not None:
             assert isinstance(sample_db, dict)
             # For ROS2, we can't deepcopy Time objects, so we'll just assign directly
@@ -99,6 +104,7 @@ class DBwLock():
         self.lock = threading.Lock()
         self.ros_node = ros_node
         self.insertion_cb = insertion_cb
+        self.last_only = set(last_only) if last_only is not None else set()
 
     def add_modify_data(self, dbm):
         """ Insert new stuff into the db. Use the header as message index """
@@ -121,9 +127,19 @@ class DBwLock():
             else:
                 raise Exception("database: Header Collision Detected")
         self.db[dbm.robot_id][dbm.topic_id][dbm.header] = dbm
+        newest = True
+        if (dbm.robot_id, dbm.topic_id) in self.last_only:
+            # LAST_MESSAGE: keep only the newest message of this robot and
+            # topic. An older message arriving late is dropped as well, and
+            # not announced.
+            messages = self.db[dbm.robot_id][dbm.topic_id]
+            latest = max(messages.values(), key=lambda m: m.ts)
+            for header in [h for h, m in messages.items() if m is not latest]:
+                del messages[header]
+            newest = latest is dbm
         self.lock.release()
         # Callback on insertion of new data
-        if self.insertion_cb is not None:
+        if self.insertion_cb is not None and newest:
             self.insertion_cb(dbm.robot_id, dbm.topic_id, dbm.ts, dbm.header)
         return dbm.header
 

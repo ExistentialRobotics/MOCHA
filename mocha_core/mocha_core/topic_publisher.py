@@ -76,6 +76,10 @@ class TopicPublisher:
                 try:
                     if future.done():
                         answ = future.result()
+                        if len(answ.msg_content) == 0:
+                            # Replaced by a newer message (LAST_MESSAGE),
+                            # which is published next
+                            return
                         ans_robot_id, ans_topic_id, ans_ts, ans_data = du.parse_answer(
                             answ, self.msg_types
                         )

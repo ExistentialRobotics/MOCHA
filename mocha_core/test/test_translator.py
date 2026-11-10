@@ -99,7 +99,8 @@ class test_translator(unittest.TestCase):
                               f"Expected exactly 1 subscription for {topic_name} topic, got {len(subscriptions_info)}")
 
     def test_translator_storm(self):
-        """Storm test: publish many messages to translator topics and verify they're all stored"""
+        """Storm test: publish many messages to translator topics and verify they're stored, only the newest on a
+        LAST_MESSAGE topic"""
         MSGS_PER_TOPIC = 10
 
         # Get available topics for this robot
@@ -197,9 +198,11 @@ class test_translator(unittest.TestCase):
             returned_headers = du.deserialize_headers(answ.headers)
 
             # Calculate expected total messages
-            # Each topic gets MSGS_PER_TOPIC messages
+            # Each topic gets MSGS_PER_TOPIC messages, and a LAST_MESSAGE
+            # topic keeps only its newest one
             # charon robot has 2 topics: /pose and /odometry
-            expected_total = MSGS_PER_TOPIC * len(this_robot_topics)
+            expected_total = sum(1 if topic.get("msg_history") == "LAST_MESSAGE" else MSGS_PER_TOPIC
+                                 for topic in this_robot_topics)
 
             # Verify all messages were stored
             self.assertEqual(len(returned_headers), expected_total,

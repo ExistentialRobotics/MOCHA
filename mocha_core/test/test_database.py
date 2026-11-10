@@ -9,6 +9,7 @@ import sample_db
 import mocha_core.hash_comm as hc
 import mocha_core.database_utils as du
 import copy
+import rclpy.time
 
 import pprint
 
@@ -141,6 +142,26 @@ class test(unittest.TestCase):
         self.assertEqual(dbm.priority, prio)
         self.assertAlmostEqual(dbm.ts, ts)
         self.assertEqual(dbm.data, data)
+
+    def test_last_message_keeps_only_the_newest(self):
+        # A LAST_MESSAGE topic (robot 0, topic 1) keeps one message: a newer
+        # one replaces the older, and an older one arriving late is dropped
+        # without the insertion callback. Topic 0 keeps its whole history.
+        inserted = []
+        dbl = database.DBwLock(insertion_cb=lambda r, t, ts, h: inserted.append(h),
+                               last_only={(0, 1)})
+        def message(topic_id, seconds):
+            return database.DBMessage(0, topic_id, 0, 1,
+                                      rclpy.time.Time(seconds=seconds), b'data')
+        first, second, late = message(1, 10), message(1, 20), message(1, 15)
+        for dbm in (first, second, late):
+            dbl.add_modify_data(dbm)
+        self.assertEqual(list(dbl.db[0][1]), [second.header])
+        self.assertEqual(inserted, [first.header, second.header])
+        self.assertRaises(Exception, dbl.find_header, first.header)
+        for seconds in (10, 20):
+            dbl.add_modify_data(message(0, seconds))
+        self.assertEqual(len(dbl.db[0][0]), 2)
 
 if __name__ == '__main__':
     # Run test cases!

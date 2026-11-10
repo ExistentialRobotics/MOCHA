@@ -68,8 +68,18 @@ class DatabaseServer:
             database_cb_msg.msg_header = header
             pub_database.publish(database_cb_msg)
 
+        # Topics that keep only their newest message, as (robot_id, topic_id)
+        last_only = set()
+        for name, config in self.robot_configs.items():
+            robot_id = du.get_robot_id_from_name(self.robot_configs, name)
+            topics = self.topic_configs.get(config["node-type"], [])
+            for topic_id, topic in enumerate(topics):
+                if topic.get("msg_history") == "LAST_MESSAGE":
+                    last_only.add((robot_id, topic_id))
+
         # Create the empty database with lock
-        self.dbl = database.DBwLock(ros_node=self.ros_node, insertion_cb=database_cb)
+        self.dbl = database.DBwLock(ros_node=self.ros_node, insertion_cb=database_cb,
+                                    last_only=last_only)
 
         # Get current robot number
         self.robot_number = du.get_robot_id_from_name(self.robot_configs,
@@ -141,7 +151,13 @@ class DatabaseServer:
         header_data = req.msg_header
         header_data = bytes(header_data)
 
-        dbm = self.dbl.find_header(header_data)
+        try:
+            dbm = self.dbl.find_header(header_data)
+        except Exception:
+            # A LAST_MESSAGE topic replaced it with a newer message after it
+            # was announced; the newer one is announced in turn
+            self.logger.debug("get_data_header_db: header not found, replaced by a newer message")
+            return response
 
         response.robot_id = dbm.robot_id
         response.topic_id = dbm.topic_id
