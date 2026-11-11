@@ -263,6 +263,27 @@ class DBwLock():
                         req_priority, req_ts, req_data)
         return dbm
 
+    def find_newer(self, requested_header):
+        """ The newest message of the requested header's robot and topic,
+        when that topic keeps only its newest message (LAST_MESSAGE) and a
+        newer one has replaced the requested one; raises otherwise. A robot
+        that relays a topic replaces it as often as it syncs with its source,
+        so a fetch from it often names a message it no longer has. """
+        assert isinstance(requested_header, bytes)
+        robot_id, topic_id, ts = \
+            hash_comm.TsHeader.from_header(requested_header).get_id_and_time()
+        if (robot_id, topic_id) not in self.last_only:
+            raise Exception('find_newer: the topic keeps its history')
+        self.lock.acquire()
+        messages = list(self.db.get(robot_id, {}).get(topic_id, {}).values())
+        self.lock.release()
+        newer = [m for m in messages if m.ts > ts]
+        if not newer:
+            raise Exception('find_newer: no newer message')
+        latest = max(newer, key=lambda m: m.ts)
+        return DBMessage(latest.robot_id, latest.topic_id, latest.dtype,
+                         latest.priority, latest.ts, latest.data)
+
     def __str__(self):
         # Print the database in a nice way
         self.lock.acquire()

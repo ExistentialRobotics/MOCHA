@@ -36,6 +36,10 @@ class Comm_msgs(enum.Enum):
     GDATA = 2
     DENDT = 3
     SERRM = 4
+    # The reply to a GDATA whose message a newer one replaced (LAST_MESSAGE):
+    # NEWER, the newer message's header, then its packed data. A packed
+    # message starts with its data type's index, never as large as 'N'.
+    NEWER = 5
 
 # - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
 """ SMACH states for the synchronization state machine"""
@@ -184,13 +188,20 @@ class GetDataReply(smach.State):
     def execute(self, userdata):
         self.outer.publishState("GetDataReply Start")
         hash_list = userdata.in_hash_list.copy()
-        if userdata.in_answer == Comm_msgs.SERRM.name.encode():
-            # The other robot no longer has this message: a LAST_MESSAGE
-            # topic replaced it with a newer one, which the next sync gets
+        answer = userdata.in_answer
+        newer = Comm_msgs.NEWER.name.encode()
+        if answer == Comm_msgs.SERRM.name.encode():
+            # The other robot has neither this message nor a newer one
             self.outer.logger.debug(f"{self.outer.this_robot} - Channel - Message not found on the other robot")
+        elif answer[:CODE_LENGTH] == newer:
+            # A newer message replaced the requested one on the other robot
+            # (LAST_MESSAGE), which sent the newer one with its header
+            header = answer[CODE_LENGTH:CODE_LENGTH + HEADER_LENGTH]
+            dbm = du.unpack_data(header, answer[CODE_LENGTH + HEADER_LENGTH:])
+            self.outer.dbl.add_modify_data(dbm)
         else:
             # store result in db
-            dbm = du.unpack_data(userdata.in_req_hash, userdata.in_answer)
+            dbm = du.unpack_data(userdata.in_req_hash, answer)
             self.outer.dbl.add_modify_data(dbm)
         hash_list.remove(userdata.in_req_hash)
         # rospy.logdebug(f"HASH_LIST {hash_list} REQ_HASH {userdata.in_req_hash}")
@@ -472,8 +483,14 @@ class Channel():
                 packed = du.pack_data(dbm)
                 return packed
             except Exception:
-                # Expected on a LAST_MESSAGE topic: a newer message replaced
-                # it after the other robot got the header list
+                pass
+            try:
+                # A LAST_MESSAGE topic replaced it after the other robot got
+                # the header list: the newer message goes in its place
+                dbm = self.dbl.find_newer(r_header)
+                return (Comm_msgs.NEWER.name.encode() + dbm.header +
+                        du.pack_data(dbm))
+            except Exception:
                 self.logger.debug(f"{self.this_robot} - Header not found: {r_header}")
                 return Comm_msgs.SERRM.name.encode()
         if header == Comm_msgs.DENDT.name:

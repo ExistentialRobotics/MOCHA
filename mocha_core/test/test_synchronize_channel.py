@@ -182,6 +182,40 @@ class test(unittest.TestCase):
         sc_4.stop()
 
 
+    def test_replaced_before_fetch_gets_the_newer(self):
+        """ A LAST_MESSAGE topic replaced on the server between its header
+        list and the client's fetch, as on a robot relaying another robot's
+        topic while it pulls that topic's newer message: the client gets the
+        newer message in the same sync """
+        last_only = {(1, 2)}
+        dbl_server = db.DBwLock(last_only=last_only)
+        dbl_client = db.DBwLock(last_only=last_only)
+        old = db.DBMessage(1, 2, 2, 1, rclpy.time.Time(seconds=10), b'old')
+        newer = db.DBMessage(1, 2, 2, 1, rclpy.time.Time(seconds=20), b'newer')
+        dbl_server.add_modify_data(old)
+        listed = dbl_server.get_header_list
+        replaced = []
+        def list_then_replace(*args, **kwargs):
+            headers = listed(*args, **kwargs)
+            if not replaced:
+                dbl_server.add_modify_data(newer)
+                replaced.append(True)
+            return headers
+        dbl_server.get_header_list = list_then_replace
+        sc_server = sync.Channel(dbl_server, 'charon', 'basestation',
+                                 self.robot_configs, 2, self.test_ros_node)
+        sc_client = sync.Channel(dbl_client, 'basestation', 'charon',
+                                 self.robot_configs, 2, self.test_ros_node)
+        sc_server.run()
+        sc_client.run()
+        sc_client.trigger_sync()
+        time.sleep(self.comm_sync_delay)
+        sc_client.stop()
+        sc_server.stop()
+        self.assertTrue(replaced)
+        self.assertEqual(list(dbl_client.db[1][2]), [newer.header])
+        self.assertEqual(dbl_client.db[1][2][newer.header].data, b'newer')
+
     def test_delay_run(self):
         self.maxDiff = None
         db_gs = sample_db.get_sample_dbl()

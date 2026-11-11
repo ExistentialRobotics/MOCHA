@@ -163,6 +163,26 @@ class test(unittest.TestCase):
             dbl.add_modify_data(message(0, seconds))
         self.assertEqual(len(dbl.db[0][0]), 2)
 
+    def test_find_newer_of_a_replaced_message(self):
+        # A fetch of a LAST_MESSAGE message that a newer one replaced finds the
+        # newer one; a topic that keeps its history, or a header with nothing
+        # newer, raises
+        dbl = database.DBwLock(last_only={(0, 1)})
+        def message(topic_id, seconds, data):
+            return database.DBMessage(0, topic_id, 0, 1,
+                                      rclpy.time.Time(seconds=seconds), data)
+        old, new = message(1, 10, b'old'), message(1, 20, b'new')
+        dbl.add_modify_data(old)
+        self.assertRaises(Exception, dbl.find_newer, old.header)
+        dbl.add_modify_data(new)
+        found = dbl.find_newer(old.header)
+        self.assertEqual((found.header, found.data), (new.header, b'new'))
+        self.assertRaises(Exception, dbl.find_newer, new.header)
+        history = message(0, 10, b'kept')
+        dbl.add_modify_data(history)
+        dbl.add_modify_data(message(0, 20, b'kept too'))
+        self.assertRaises(Exception, dbl.find_newer, history.header)
+
 if __name__ == '__main__':
     # Run test cases!
     unittest.main()
