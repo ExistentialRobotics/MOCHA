@@ -4,6 +4,10 @@ import rclpy.time
 import struct
 
 LENGTH = 6
+# A header's time below the second, in 1/TICKS s: its 16 bits hold 65536 ticks of
+# about 15 us, so two messages of one topic stamped under a millisecond apart,
+# as a node publishing at 5 Hz gets now and then, no longer share a header.
+TICKS = 65536
 
 """ hash_comm.py
     This file defines the potential headers to be used in the database. There
@@ -42,13 +46,13 @@ class TsHeader():
     # Get length in bytes
     HEADER_LENGTH = LENGTH
 
-    def __init__(self, *, robot_id=None, topic_id=None, secs=None, msecs=None):
+    def __init__(self, *, robot_id=None, topic_id=None, secs=None, ticks=None):
         # You should not use this constructor to create the class. Use
         # from_data or from_header instead
         self.robot_id = robot_id
         self.topic_id = topic_id
         self.secs = secs
-        self.msecs = msecs
+        self.ticks = ticks
 
     @classmethod
     def from_data(cls, robot_id, topic_id, time):
@@ -61,40 +65,43 @@ class TsHeader():
 
         # The header will be comprised of 1 byte for the robot number, 1 byte
         # for the topic id, and 4 bytes for the time. The first 2 bytes of the
-        # time are the secs, and the 2 last bytes are the ms of the message.
-        # This means that we have ms resolution. We only handle positive times
+        # time are the secs, and the 2 last bytes are the ticks (1/TICKS s) of
+        # the message, about 15 us. We only handle positive times
         assert type(time.seconds_nanoseconds()[0]) == int and time.seconds_nanoseconds()[0] >= 0
         assert type(time.seconds_nanoseconds()[1]) == int and time.seconds_nanoseconds()[1] >= 0
         secs = time.seconds_nanoseconds()[0] % 65536
-        msecs = time.seconds_nanoseconds()[1] // 1000000
+        ticks = time.seconds_nanoseconds()[1] * TICKS // 1000000000
         robot_id = robot_id
         topic_id = topic_id
         return cls(robot_id=robot_id, topic_id=topic_id,
-                   secs=secs, msecs=msecs)
+                   secs=secs, ticks=ticks)
 
     @classmethod
     def from_header(cls, header):
         robot_id = struct.unpack("!B", header[0:1])[0]
         topic_id = struct.unpack("!B", header[1:2])[0]
         secs = struct.unpack("!H", header[2:4])[0]
-        msecs = struct.unpack("!H", header[4:6])[0]
+        ticks = struct.unpack("!H", header[4:6])[0]
         return cls(robot_id=robot_id, topic_id=topic_id,
-                   secs=secs, msecs=msecs)
+                   secs=secs, ticks=ticks)
 
     def bindigest(self):
         # Assemble the header by concatenating data, using struct
         b = struct.pack("!B", self.robot_id)
         b += struct.pack("!B", self.topic_id)
         b += struct.pack("!H", self.secs)
-        b += struct.pack("!H", self.msecs)
+        b += struct.pack("!H", self.ticks)
         return b
 
     def get_id_and_time(self):
         assert self.robot_id is not None
         assert self.topic_id is not None
         assert self.secs is not None
-        assert self.msecs is not None
-        time = rclpy.time.Time(seconds=self.secs, nanoseconds=self.msecs*1000000)
+        assert self.ticks is not None
+        # Rounded up, so that from_data of this time gives this header again: a
+        # message's time is its header's, made and read more than once.
+        nanoseconds = -(-self.ticks * 1000000000 // TICKS)
+        time = rclpy.time.Time(seconds=self.secs, nanoseconds=nanoseconds)
         return self.robot_id, self.topic_id, time
 
 if __name__ == "__main__":
@@ -132,8 +139,8 @@ if __name__ == "__main__":
         for i in range(100):
             random_robot = random.randint(0, 255)
             random_topic = random.randint(0, 255)
-            random_time = rclpy.time.Time(seconds=random.randint(0, 65536),
-                                          nanoseconds=random.randint(0, 1000000000))
+            random_time = rclpy.time.Time(seconds=random.randint(0, 65535),
+                                          nanoseconds=random.randint(0, 999999999))
             ts = TsHeader.from_data(random_robot, random_topic, random_time)
             bindigest = ts.bindigest()
             ts2 = TsHeader.from_header(bindigest)
@@ -141,7 +148,10 @@ if __name__ == "__main__":
             assert robot_id == random_robot
             assert topic_id == random_topic
             assert time.seconds_nanoseconds()[0] == random_time.seconds_nanoseconds()[0]
-            assert np.abs(time.seconds_nanoseconds()[1]-random_time.seconds_nanoseconds()[1]) < 1000000
+            assert np.abs(time.seconds_nanoseconds()[1]-random_time.seconds_nanoseconds()[1]) < 1000000000 // TICKS + 1
+            # made again from its own time, a header is the same
+            again = TsHeader.from_data(robot_id, topic_id, time)
+            assert again.bindigest() == bindigest
     else:
         sys.exit("Invalid test")
 

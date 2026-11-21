@@ -79,6 +79,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(test_database_server test/test_database_server.py)
   ament_add_pytest_test(test_translator test/test_translator.py)
   ament_add_pytest_test(test_topic_publisher test/test_topic_publisher.py)
+  ament_add_pytest_test(test_push test/test_push.py)
 endif()
 
 ament_package()

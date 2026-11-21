@@ -13,11 +13,11 @@ import rclpy.time
 
 import pprint
 
-ROBOT0_TOPIC0_PRIO0 = b'\x00\x00\x00u\x00\xde'
-ROBOT0_TOPIC1_PRIO1_OLD = b'\x00\x01\x00v\x00\xde'
-ROBOT0_TOPIC1_PRIO1_NEW = b'\x00\x01\x00w\x00\xde'
-ROBOT1_TOPIC0_PRIO4_NEW = b'\x01\x00\x01O\x00\xdc'
-ROBOT1_TOPIC0_PRIO4_OLD = b'\x01\x00\x01O\x00\xc7'
+ROBOT0_TOPIC0_PRIO0 = sample_db.header_of(0, 0, 'msg2')
+ROBOT0_TOPIC1_PRIO1_OLD = sample_db.header_of(0, 1, 'msg3')
+ROBOT0_TOPIC1_PRIO1_NEW = sample_db.header_of(0, 1, 'msg4')
+ROBOT1_TOPIC0_PRIO4_NEW = sample_db.header_of(1, 0, 'msg1')
+ROBOT1_TOPIC0_PRIO4_OLD = sample_db.header_of(1, 0, 'msg2')
 
 
 class test(unittest.TestCase):
@@ -91,18 +91,18 @@ class test(unittest.TestCase):
         self.assertListEqual(discover_extra_header,
                              new_headers)
         # Test with older header, create a copy of one of the existing headers in the
-        # db. Pick one with the msec field that can accomodate both addition and
+        # db. Pick one with the ticks field that can accomodate both addition and
         # substraction
         test_header = None
         for header in header_list:
             h = hc.TsHeader.from_header(header)
-            if h.msecs > 0 and h.msecs < 999:
+            if h.ticks > 0 and h.ticks < 65535:
                 test_header = header
                 break
         self.assertTrue(test_header is not None)
         # Modify the timestamp to make it before the current msg
         h = hc.TsHeader.from_header(test_header)
-        h.msecs -= 1
+        h.ticks -= 1
         extra_header_3 = h.bindigest()
         header_list.append(extra_header_3)
         discover_extra_header_latest = dbl.headers_not_in_local(header_list, newer=True)
@@ -114,7 +114,7 @@ class test(unittest.TestCase):
         self.assertEqual(diff_header.pop(), extra_header_3)
         # Modify the timestamp to make it after the current msg
         h = hc.TsHeader.from_header(test_header)
-        h.msecs += 1
+        h.ticks += 1
         extra_header_4 = h.bindigest()
         header_list.append(extra_header_4)
         discover_extra_header_latest = dbl.headers_not_in_local(header_list, newer=True)
@@ -128,7 +128,7 @@ class test(unittest.TestCase):
 
     def test_find_header(self):
         dbl = sample_db.get_sample_dbl()
-        header = b'\x01\x00\x01O\x00\xc7'
+        header = sample_db.header_of(1, 0, 'msg2')
         robot_id = 1
         topic_id = 0
         dtype = dbl.db[robot_id][topic_id][header].dtype
@@ -182,6 +182,73 @@ class test(unittest.TestCase):
         dbl.add_modify_data(history)
         dbl.add_modify_data(message(0, 20, b'kept too'))
         self.assertRaises(Exception, dbl.find_newer, history.header)
+
+    def test_messages_a_tenth_of_a_ms_apart_keep_their_own_headers(self):
+        # A header's time is kept to 1/65536 s: two messages of one topic
+        # stamped 0.1 ms apart, as a node publishing at 5 Hz gets now and then,
+        # have different headers, the later one the newer, and each header
+        # made again from its message's time is the same.
+        first = database.DBMessage(0, 1, 0, 1,
+                                   rclpy.time.Time(seconds=100, nanoseconds=500000000), b'first')
+        second = database.DBMessage(0, 1, 0, 1,
+                                    rclpy.time.Time(seconds=100, nanoseconds=500100000), b'second')
+        self.assertNotEqual(first.header, second.header)
+        self.assertTrue(database.is_newer(second.ts, first.ts))
+        for m in (first, second):
+            again = hc.TsHeader.from_data(0, 1, m.ts)
+            self.assertEqual(again.bindigest(), m.header)
+        dbl = database.DBwLock()
+        dbl.add_modify_data(first)
+        dbl.add_modify_data(second)
+        self.assertEqual(len(dbl.db[0][1]), 2)
+
+    def test_a_message_held_over_half_a_wrap_loses_to_any(self):
+        # A LAST_MESSAGE topic quiet overnight: its message from 18:00 has
+        # been held 14 h by this computer's clock, more than half a wrap, when
+        # one from 08:00 comes, whose header time reads as older across the
+        # wrap. The new one is kept, and a remote one is asked for.
+        dbl = database.DBwLock(last_only={(0, 1)})
+        def message(seconds, data):
+            return database.DBMessage(0, 1, 0, 1, rclpy.time.Time(seconds=seconds), data)
+        evening = message(18 * 3600, b'evening')
+        morning = message(18 * 3600 + 14 * 3600, b'morning')
+        self.assertFalse(database.is_newer(morning.ts, evening.ts))
+        dbl.add_modify_data(evening)
+        evening.held_since -= 14 * 3600
+        self.assertEqual(dbl.headers_not_in_local([morning.header], newer=True), [morning.header])
+        dbl.add_modify_data(morning)
+        self.assertEqual(list(dbl.db[0][1]), [morning.header])
+
+    def test_newer_across_the_wrap_of_the_header_time(self):
+        # A header keeps the seconds modulo 65536. A message sent just after
+        # a wrap is newer than one sent just before it: a LAST_MESSAGE topic
+        # keeps it, a robot holding the earlier one asks for it, and a fetch
+        # of the earlier one finds it. Two full wraps later the same holds.
+        for wraps in (1, 3):
+            inserted = []
+            dbl = database.DBwLock(insertion_cb=lambda r, t, ts, h: inserted.append(h),
+                                   last_only={(0, 1)})
+            def message(seconds, data):
+                return database.DBMessage(0, 1, 0, 1,
+                                          rclpy.time.Time(seconds=seconds), data)
+            before = message(65536*wraps - 1, b'before')
+            after = message(65536*wraps + 1, b'after')
+            self.assertLess(after.ts, before.ts)  # as the header keeps them
+            self.assertTrue(database.is_newer(after.ts, before.ts))
+            self.assertFalse(database.is_newer(before.ts, after.ts))
+            self.assertFalse(database.is_newer(before.ts, before.ts))
+            dbl.add_modify_data(before)
+            self.assertEqual(dbl.headers_not_in_local([after.header], newer=True),
+                             [after.header])
+            dbl.add_modify_data(after)
+            self.assertEqual(list(dbl.db[0][1]), [after.header])
+            self.assertEqual(inserted, [before.header, after.header])
+            self.assertEqual(dbl.get_header_list(filter_latest=True), [after.header])
+            self.assertEqual(dbl.headers_not_in_local([before.header], newer=True), [])
+            self.assertEqual(dbl.find_newer(before.header).data, b'after')
+            # The earlier one arriving late is dropped
+            dbl.add_modify_data(message(65536*wraps - 1, b'before'))
+            self.assertEqual(list(dbl.db[0][1]), [after.header])
 
 if __name__ == '__main__':
     # Run test cases!

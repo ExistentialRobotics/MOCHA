@@ -1,8 +1,37 @@
 #!/usr/bin/env python3
 import threading
+import time
 import mocha_core.hash_comm as hash_comm
 import rclpy.time
 import pdb
+
+# A header keeps a message's seconds modulo 65536 (hash_comm.TsHeader), and
+# a message's time is its header's, so the times wrap every 18.2 hours. They
+# are compared modulo that wrap: of two times, the one less than half a wrap
+# ahead of the other is the newer. This orders any messages sent within 9.1
+# hours of each other, whenever the wrap comes. A message held longer than
+# that, by this computer's clock, is older than any other: it cannot be
+# ordered by its time, and a topic that went quiet overnight would otherwise
+# take its new messages for older ones.
+WRAP = 65536 * 10**9  # ns
+
+
+def is_newer(a, b):
+    """ Whether time a is after time b """
+    return 0 < (a.nanoseconds - b.nanoseconds) % WRAP < WRAP // 2
+
+
+def newest_message(messages):
+    """ The newest of some messages; None when there are none. Those held
+    less than half a wrap count before any held longer. """
+    now = time.monotonic()
+    messages = list(messages)
+    fresh = [m for m in messages if now - m.held_since < WRAP / 2e9]
+    latest = None
+    for m in fresh or messages:
+        if latest is None or is_newer(m.ts, latest.ts):
+            latest = m
+    return latest
 
 
 class DBMessage():
@@ -43,9 +72,11 @@ class DBMessage():
         header = hash_comm.TsHeader.from_data(self.robot_id,
                                               self.topic_id, self.ts)
         self.header = header.bindigest()
-        # Update timestamp to match header precision (ms resolution)
+        # Update timestamp to match the header's precision (1/65536 s)
         _, _, header_ts = header.get_id_and_time()
         self.ts = header_ts
+        # s, this computer's monotonic clock: when this robot came to hold it
+        self.held_since = time.monotonic()
 
     def __eq__(self, other):
         if not isinstance(other, DBMessage):
@@ -133,7 +164,7 @@ class DBwLock():
             # topic. An older message arriving late is dropped as well, and
             # not announced.
             messages = self.db[dbm.robot_id][dbm.topic_id]
-            latest = max(messages.values(), key=lambda m: m.ts)
+            latest = newest_message(messages.values())
             for header in [h for h, m in messages.items() if m is not latest]:
                 del messages[header]
             newest = latest is dbm
@@ -171,13 +202,7 @@ class DBwLock():
                         header_list[header] = {'prio': msg_content.priority,
                                                'ts': msg_content.ts}
                 else:
-                    latest_msg_ts = rclpy.time.Time()
-                    latest_msg = None
-                    for header in self.db[robot_id][topic]:
-                        msg_content = self.db[robot_id][topic][header]
-                        if msg_content.ts > latest_msg_ts:
-                            latest_msg_ts = msg_content.ts
-                            latest_msg = msg_content
+                    latest_msg = newest_message(self.db[robot_id][topic].values())
                     if latest_msg is not None:
                         header_list[latest_msg.header] = {'prio': latest_msg.priority,
                                                           'ts': latest_msg.ts}
@@ -198,12 +223,10 @@ class DBwLock():
             if robot_id not in ts_dict:
                 ts_dict[robot_id] = {}
             for topic in self.db[robot_id]:
-                if topic not in ts_dict[robot_id]:
-                    ts_dict[robot_id][topic] = None
-                for header in self.db[robot_id][topic]:
-                    msg = self.db[robot_id][topic][header]
-                    curr_time = ts_dict[robot_id][topic]
-                    ts_dict[robot_id][topic] = max(curr_time, msg.ts) if curr_time is not None else msg.ts
+                latest = newest_message(self.db[robot_id][topic].values())
+                # One held over half a wrap has no time to compare: any remote one is newer
+                stale = latest is not None and time.monotonic() - latest.held_since >= WRAP / 2e9
+                ts_dict[robot_id][topic] = latest.ts if latest is not None and not stale else None
         self.lock.release()
         return ts_dict
 
@@ -225,12 +248,13 @@ class DBwLock():
             ts_dict = self.get_ts_dict()
             for h in remote_header_list:
                 h = hash_comm.TsHeader.from_header(h)
-                r_id, t_id, time = h.get_id_and_time()
+                r_id, t_id, h_ts = h.get_id_and_time()
                 if r_id not in ts_dict:
                     missing_headers.append(h.bindigest())
                 elif t_id not in ts_dict[h.robot_id]:
                     missing_headers.append(h.bindigest())
-                elif (time > ts_dict[h.robot_id][h.topic_id]):
+                elif (ts_dict[h.robot_id][h.topic_id] is None or
+                      is_newer(h_ts, ts_dict[h.robot_id][h.topic_id])):
                     missing_headers.append(h.bindigest())
             return missing_headers
 
@@ -277,10 +301,10 @@ class DBwLock():
         self.lock.acquire()
         messages = list(self.db.get(robot_id, {}).get(topic_id, {}).values())
         self.lock.release()
-        newer = [m for m in messages if m.ts > ts]
-        if not newer:
+        latest = newest_message(
+            [m for m in messages if is_newer(m.ts, ts)])
+        if latest is None:
             raise Exception('find_newer: no newer message')
-        latest = max(newer, key=lambda m: m.ts)
         return DBMessage(latest.robot_id, latest.topic_id, latest.dtype,
                          latest.priority, latest.ts, latest.data)
 

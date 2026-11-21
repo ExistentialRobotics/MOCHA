@@ -146,17 +146,28 @@ def serialize_ros_msg(msg):
     compressed = lz4.frame.compress(serialized)
     return compressed
 
-def deserialize_ros_msg(msg):
-    """ Decompress and deserialize a message using ROS 2 serialization """
+def deserialize_ros_msg(msg, constructor):
+    """ Decompress and deserialize a message of type constructor, as
+    serialize_ros_msg made it """
+    return deserialize_message(lz4.frame.decompress(msg), constructor)
+
+
+def topics_with_history(robot_configs, topic_configs, history):
+    """ Every robot's topics whose msg_history is `history`, as a set of
+    (robot_id, topic_id) """
+    out = set()
+    for name, config in robot_configs.items():
+        robot_id = get_robot_id_from_name(robot_configs, name)
+        for topic_id, topic in enumerate(topic_configs.get(config["node-type"], [])):
+            if topic.get("msg_history") == history:
+                out.add((robot_id, topic_id))
+    return out
 
 
 def parse_answer(api_answer, msg_types):
     constructor = msg_types[api_answer.robot_id][api_answer.topic_id]['obj']
     # api_answer.msg_content has the compressed message
-
-    # Debug: Check what we're trying to decompress
-    decompressed = lz4.frame.decompress(api_answer.msg_content)
-    msg = deserialize_message(decompressed, constructor)
+    msg = deserialize_ros_msg(api_answer.msg_content, constructor)
     robot_id = api_answer.robot_id
     topic_id = api_answer.topic_id
     ts = api_answer.timestamp

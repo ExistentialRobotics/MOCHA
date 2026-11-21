@@ -2,6 +2,7 @@
 
 import os
 import pdb
+import socket
 import sys
 
 import rclpy
@@ -15,6 +16,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 import mocha_core.database_utils as du
 from mocha_core.srv import AddUpdateDB, GetDataHeaderDB, SelectDB
 import mocha_core.database_server as ds
+import mocha_core.push as push
 
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
@@ -28,8 +30,12 @@ QOS_PROFILE = QoSProfile(
 
 class Translator():
     def __init__(
-        self, this_robot, this_robot_id, topic_name, topic_id, msg_type, ros_node, callback_group=None
+        self, this_robot, this_robot_id, topic_name, topic_id, msg_type, ros_node, callback_group=None,
+        push_to=None
     ):
+        # push_to: for a PUSH topic, the (IP-address, push-port) of each
+        # client robot, which get each message at once instead of the
+        # database (push.py); None for any other topic
 
         self.logger = ros_node.get_logger()
         self.ros_node = ros_node
@@ -37,6 +43,9 @@ class Translator():
         self.topic_id = topic_id
         self.this_robot = this_robot
         self.this_robot_id = this_robot_id
+        self.push_to = push_to
+        if push_to is not None:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         # Create service client
         self.add_update_db_cli = self.ros_node.create_client(AddUpdateDB,
@@ -61,6 +70,9 @@ class Translator():
         msg = data
 
         serialized_msg = du.serialize_ros_msg(msg)
+        if self.push_to is not None:
+            self.push(serialized_msg)
+            return
         # Get current time
         ts = self.ros_node.get_clock().now().to_msg()
 
@@ -80,6 +92,19 @@ class Translator():
                     "Service call failed for {self.topic_name}"
                 )
         future.add_done_callback(response_callback)
+
+    def push(self, serialized_msg):
+        data = push.datagram(self.this_robot_id, self.topic_id, serialized_msg)
+        if len(data) > push.MAX_DATAGRAM:
+            self.logger.error(f"{self.this_robot} - translator - {self.topic_name}: " +
+                              f"a message of {len(data)} bytes is too large to push")
+            return
+        for to in self.push_to:
+            try:
+                self.socket.sendto(data, to)
+            except OSError as e:
+                # A robot out of reach; the next message tries again
+                self.logger.debug(f"{self.this_robot} - translator - push to {to}: {e}")
 
 class TranslatorNode(Node):
     def __init__(self, this_robot=None, robot_configs=None, topic_configs=None):
@@ -131,12 +156,19 @@ class TranslatorNode(Node):
 
         # Create translators for each topic
         translators = []
+        pushed = du.topics_with_history(self.robot_configs, self.topic_configs, "PUSH")
         for topic_id, topic in enumerate(this_robot_topics):
             # Get robot id
             robot_id = du.get_robot_id_from_name(self.robot_configs, self.this_robot)
             obj = self.msg_types[robot_id][topic_id]["obj"]
+            push_to = None
+            if (robot_id, topic_id) in pushed:
+                # A client not in the list is no robot to send to, as the syncs skip it too
+                push_to = [push.address(self.robot_configs, c)
+                           for c in self.robot_configs[self.this_robot]["clients"] if c in self.robot_configs]
             translator = Translator(
-                self.this_robot, robot_id, topic["msg_topic"], topic_id, obj, self, self.callback_group
+                self.this_robot, robot_id, topic["msg_topic"], topic_id, obj, self, self.callback_group,
+                push_to
             )
             translators.append(translator)
 

@@ -2,6 +2,7 @@
 import os
 import pdb
 import re
+import socket
 import sys
 
 import rclpy
@@ -19,6 +20,7 @@ from mocha_core.srv import AddUpdateDB, GetDataHeaderDB, SelectDB
 from mocha_core.msg import DatabaseCB
 import mocha_core.database_server as ds
 import mocha_core.hash_comm as hc
+import mocha_core.push as push
 import queue
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
@@ -165,6 +167,7 @@ class TopicPublisherNode(Node):
         # )
 
         self.list_of_threads = {}
+        self.push_shutdown = threading.Event()
         # Iterate for each robot in robot_configs, and generate the threads
         for robot in self.robot_configs.keys():
             robot_id = du.get_robot_id_from_name(self.robot_configs, robot)
@@ -191,6 +194,54 @@ class TopicPublisherNode(Node):
                                        self.msgheader_callback, 10,
                                        callback_group=self.callback_group)
 
+        # The other robots' PUSH topics, as (robot_id, topic_id), heard on
+        # this robot's push-port (push.py)
+        this_robot_id = du.get_robot_id_from_name(self.robot_configs, self.this_robot)
+        self.push_topics = {(r, t) for r, t in
+                            du.topics_with_history(self.robot_configs, self.topic_configs, "PUSH")
+                            if r != this_robot_id}
+        self.push_th = None
+        if self.push_topics:
+            # Without the port, the synced topics still come; only the pushed
+            # ones are lost, which the error says.
+            to = push.address(self.robot_configs, self.this_robot)
+            self.push_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                self.push_socket.bind(to)
+            except OSError as e:
+                self.logger.error(f"{self.this_robot} - Topic Publisher - cannot hear pushed " +
+                                  f"topics on UDP {to}: {e}")
+                self.push_socket.close()
+            else:
+                self.push_socket.settimeout(1)
+                self.push_th = threading.Thread(target=self.hear_pushes, daemon=True)
+                self.push_th.start()
+
+    def hear_pushes(self):
+        """ Publishes each pushed message as it comes: one of a PUSH topic
+        of another robot that deserializes. Anything else is dropped. """
+        while not self.push_shutdown.is_set():
+            try:
+                data = self.push_socket.recv(push.MAX_DATAGRAM)
+            except socket.timeout:
+                continue
+            except OSError as e:
+                if not self.push_shutdown.is_set():
+                    self.logger.error(f"{self.this_robot} - Topic Publisher - pushed topics no longer heard: {e}")
+                break
+            parsed = push.parse(data)
+            if parsed is None:
+                continue
+            robot_id, topic_id, payload = parsed
+            if (robot_id, topic_id) not in self.push_topics:
+                continue
+            try:
+                constructor = self.msg_types[robot_id][topic_id]["obj"]
+                msg = du.deserialize_ros_msg(payload, constructor)
+                self.list_of_threads[robot_id][topic_id].publisher.publish(msg)
+            except Exception as e:
+                self.logger.debug(f"{self.this_robot} - Topic Publisher - a pushed message dropped: {e}")
+
     def msgheader_callback(self, data):
         robot_id = data.robot_id
         topic_id = data.topic_id
@@ -201,6 +252,10 @@ class TopicPublisherNode(Node):
 
 
     def shutdown(self):
+        self.push_shutdown.set()
+        if self.push_th is not None:
+            self.push_th.join()
+            self.push_socket.close()
         for topic_ids in self.list_of_threads.values():
             for tp in topic_ids.values():
                 tp.shutdown()

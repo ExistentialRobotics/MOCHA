@@ -60,6 +60,18 @@ DB_TEMPLATE = {
         }
 
 
+def message_of(robot_id, topic_id, msg):
+    """ DB_TEMPLATE's message msg of a robot and topic, as a DBMessage """
+    m = DB_TEMPLATE[robot_id][topic_id][msg]
+    ts = rclpy.time.Time(seconds=int(m['ts']), nanoseconds=int((m['ts'] % 1) * 1e9))
+    return db.DBMessage(robot_id, topic_id, m['dtype'], m['priority'], ts, m['data'])
+
+
+def header_of(robot_id, topic_id, msg):
+    """ The header of DB_TEMPLATE's message msg, whatever a header's time unit """
+    return message_of(robot_id, topic_id, msg).header
+
+
 def get_sample_dbl():
     DB = {}
     for robot_id in DB_TEMPLATE:
@@ -69,12 +81,7 @@ def get_sample_dbl():
             if topic_id not in DB[robot_id]:
                 DB[robot_id][topic_id] = {}
             for msg in DB_TEMPLATE[robot_id][topic_id]:
-                ts = DB_TEMPLATE[robot_id][topic_id][msg]['ts']
-                ts = rclpy.time.Time(seconds=int(ts), nanoseconds=int((ts % 1) * 1e9))
-                data = DB_TEMPLATE[robot_id][topic_id][msg]['data']
-                dtype = DB_TEMPLATE[robot_id][topic_id][msg]['dtype']
-                prio = DB_TEMPLATE[robot_id][topic_id][msg]['priority']
-                c = db.DBMessage(robot_id, topic_id, dtype, prio, ts, data)
+                c = message_of(robot_id, topic_id, msg)
                 DB[robot_id][topic_id][c.header] = c
     dbl = db.DBwLock(DB)
     return dbl

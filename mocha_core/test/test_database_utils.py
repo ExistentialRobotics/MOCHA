@@ -16,9 +16,9 @@ import mocha_core.hash_comm as hc
 from rclpy.node import Node
 from rclpy.executors import SingleThreadedExecutor
 
-ROBOT0_TOPIC2_PRIO0 = b'\x00\x00\x00u\x00\xde'
-ROBOT1_TOPIC1_PRIO4 = b'\x01\x00\x01O\x00\xdc'
-ROBOT1_TOPIC2_PRIO2 = b'\x01\x00\x01O\x00\xc7'
+ROBOT0_TOPIC2_PRIO0 = sample_db.header_of(0, 0, 'msg2')
+ROBOT1_TOPIC1_PRIO4 = sample_db.header_of(1, 0, 'msg1')
+ROBOT1_TOPIC2_PRIO2 = sample_db.header_of(1, 0, 'msg2')
 
 class Database_utils_test(Node):
     def __init__(self):
